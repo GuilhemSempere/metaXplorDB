@@ -21,11 +21,14 @@ import java.io.FileReader;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Date;
 import java.util.Enumeration;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.MissingResourceException;
+import java.util.NoSuchElementException;
 import java.util.Properties;
 import java.util.ResourceBundle;
 import java.util.ResourceBundle.Control;
@@ -48,12 +51,16 @@ import org.springframework.data.mongodb.core.query.Update;
 import org.springframework.stereotype.Component;
 
 import com.mongodb.BasicDBObject;
+import com.mongodb.ServerAddress;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoCursor;
+import com.mongodb.connection.ClusterDescription;
+import com.mongodb.connection.ServerDescription;
 
 import fr.cirad.metaxplor.importing.AccessionImport;
 import fr.cirad.metaxplor.importing.NCBITaxonomyImport;
 import fr.cirad.metaxplor.model.Accession;
+import fr.cirad.metaxplor.model.DatabaseInformation;
 import fr.cirad.metaxplor.model.MetagenomicsProject;
 import fr.cirad.metaxplor.model.Taxon;
 import fr.cirad.tools.AppConfig;
@@ -91,6 +98,11 @@ public class MongoTemplateManager implements ApplicationContextAware {
     private static Map<String, MongoClient> mongoClients = new HashMap<>();
     private static final String RESOURCE = "datasources";
     private static final String EXPIRY_PREFIX = "_ExpiresOn_";
+    
+    /**
+     * The datasource properties
+     */  
+    static private Properties dataSourceProperties = new Properties();
 
     public static final String TMP_VIEW_PREFIX = "view_";
     public static final String TMP_SAMPLE_SORT_CACHE_COLL = "sampleSortCache_";
@@ -112,6 +124,11 @@ public class MongoTemplateManager implements ApplicationContextAware {
     public enum ModuleAction {
         CREATE, UPDATE_STATUS, DELETE;
     }
+
+	/** Map that associates modules to projects currently undergoing a write operation, thus making them unavailable for other write operations
+	 *  A null value in the set indicates the whole module is locked (i.e., a dump is being generated or restored)
+	 */
+	private static HashMap<String /*module*/, Set<String> /*projects*/> currentlyImportedProjects = new HashMap<String, Set<String>>();
 
     /**
      *
@@ -495,5 +512,87 @@ public class MongoTemplateManager implements ApplicationContextAware {
             }
         }
         return null;
+    }
+    
+    
+	public static boolean isModuleAvailableForWriting(String sModule) {
+		Set<String> projects = currentlyImportedProjects.get(sModule);
+		if (projects != null) {
+			return projects.size() == 0;
+		} else {
+			return true;
+		}
+	}
+
+	public static void lockProjectForWriting(String sModule, String sProject) {
+		Set<String> projects = currentlyImportedProjects.get(sModule);
+		if (projects != null) {
+			projects.add(sProject);
+		} else {
+			projects = new HashSet<String>();
+			projects.add(sProject);
+			currentlyImportedProjects.put(sModule, projects);
+		}
+	}
+
+	public static void unlockProjectForWriting(String sModule, String sProject) {
+		Set<String> moduleLockedProjects = currentlyImportedProjects.get(sModule);
+		if (moduleLockedProjects == null)
+			throw new NoSuchElementException("There are currently no locked projects in database " + sModule);
+		moduleLockedProjects.remove(sProject);
+	}
+
+	public static void lockModuleForWriting(String sModule) {
+		Set<String> projects = currentlyImportedProjects.get(sModule);
+		if (projects != null) {
+			projects.add(null);
+		} else {
+			projects = new HashSet<String>();
+			projects.add(null);
+			currentlyImportedProjects.put(sModule, projects);
+		}
+	}
+
+	public static void unlockModuleForWriting(String sModule) {
+		Set<String> projects = currentlyImportedProjects.get(sModule);
+		if (projects != null) {
+			projects.clear();
+		}
+	}
+	
+    public static void updateDatabaseLastModification(String sModule) {
+    	MongoTemplateManager.updateDatabaseLastModification(sModule, new Date(), false);
+    }
+    
+    public static void updateDatabaseLastModification(String sModule, Date lastModification, boolean restored) {
+    	MongoTemplate template = MongoTemplateManager.get(sModule);
+    	
+    	Update update = new Update();
+    	update.set(DatabaseInformation.FIELDNAME_LAST_MODIFICATION, lastModification);
+    	update.set(DatabaseInformation.FIELDNAME_RESTORE_DATE, restored ? new Date() : null);
+    	template.upsert(new Query(), update, "dbInfo");
+    }
+    
+    public static DatabaseInformation getDatabaseInformation(String sModule) {
+    	MongoTemplate template = MongoTemplateManager.get(sModule);
+    	return template.findOne(new Query(), DatabaseInformation.class, "dbInfo");
+    }
+    
+    public static String getDatabaseName(String sModule) {
+    	String sModuleKey = (isModulePublic(sModule) ? "*" : "") + sModule + (isModuleHidden(sModule) ? "*" : "");
+    	String dataSource = dataSourceProperties.getProperty(sModuleKey);
+    	return dataSource.split(",")[1];
+    }
+    
+    public static List<String> getServerHosts(String sHost) {
+    	MongoClient client = mongoClients.get(sHost);
+    	ClusterDescription cluster = client.getClusterDescription();
+    	List<ServerDescription> servers = cluster.getServerDescriptions();
+    	List<String> hosts = new ArrayList<String>();
+    	for (ServerDescription desc : servers) {
+    		ServerAddress address = desc.getAddress();
+    		hosts.add(address.getHost() + ":" + address.getPort());
+    	}
+    	return hosts;
     }
 }
