@@ -19,13 +19,17 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.FileReader;
 import java.io.IOException;
+import java.io.InputStream;
+import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Date;
 import java.util.Enumeration;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.MissingResourceException;
+import java.util.NoSuchElementException;
 import java.util.Properties;
 import java.util.ResourceBundle;
 import java.util.ResourceBundle.Control;
@@ -34,6 +38,7 @@ import java.util.TreeMap;
 import java.util.TreeSet;
 
 import org.apache.log4j.Logger;
+import org.springframework.beans.BeansException;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.ApplicationContextAware;
@@ -48,12 +53,15 @@ import org.springframework.data.mongodb.core.query.Update;
 import org.springframework.stereotype.Component;
 
 import com.mongodb.BasicDBObject;
+import com.mongodb.ServerAddress;
 import com.mongodb.client.MongoClient;
-import com.mongodb.client.MongoCursor;
+import com.mongodb.connection.ClusterDescription;
+import com.mongodb.connection.ServerDescription;
 
 import fr.cirad.metaxplor.importing.AccessionImport;
 import fr.cirad.metaxplor.importing.NCBITaxonomyImport;
 import fr.cirad.metaxplor.model.Accession;
+import fr.cirad.metaxplor.model.DatabaseInformation;
 import fr.cirad.metaxplor.model.MetagenomicsProject;
 import fr.cirad.metaxplor.model.Taxon;
 import fr.cirad.tools.AppConfig;
@@ -91,6 +99,16 @@ public class MongoTemplateManager implements ApplicationContextAware {
     private static Map<String, MongoClient> mongoClients = new HashMap<>();
     private static final String RESOURCE = "datasources";
     private static final String EXPIRY_PREFIX = "_ExpiresOn_";
+    
+    /**
+     * The datasource  (properties filename)
+     */
+    static private String resource = "datasources";
+
+    /**
+     * The datasource properties
+     */  
+    static private Properties dataSourceProperties = new Properties();
 
     public static final String TMP_VIEW_PREFIX = "view_";
     public static final String TMP_SAMPLE_SORT_CACHE_COLL = "sampleSortCache_";
@@ -112,6 +130,11 @@ public class MongoTemplateManager implements ApplicationContextAware {
     public enum ModuleAction {
         CREATE, UPDATE_STATUS, DELETE;
     }
+
+	/** Map that associates modules to projects currently undergoing a write operation, thus making them unavailable for other write operations
+	 *  A null value in the set indicates the whole module is locked (i.e., a dump is being generated or restored)
+	 */
+	private static HashMap<String /*module*/, Set<String> /*projects*/> currentlyImportedProjects = new HashMap<String, Set<String>>();
 
     /**
      *
@@ -179,11 +202,14 @@ public class MongoTemplateManager implements ApplicationContextAware {
      *
      * @param ac
      */
-    public static void initialize(ApplicationContext ac) {
+    static public void initialize(ApplicationContext ac) throws BeansException {
+    	if (applicationContext != null)
+    		return;	// already initialized
+    	
         applicationContext = ac;
-        while (applicationContext.getParent() != null) /* we want the root application-context */ {
+        while (applicationContext.getParent() != null) /* we want the root application-context */
             applicationContext = applicationContext.getParent();
-        }
+
         loadDataSources();
     }
 
@@ -197,21 +223,28 @@ public class MongoTemplateManager implements ApplicationContextAware {
         publicDatabases.clear();
         hiddenDatabases.clear();
         try {
-            ResourceBundle bundle = ResourceBundle.getBundle(RESOURCE, RESOURCE_CONTROL);
             mongoClients = applicationContext.getBeansOfType(MongoClient.class);
-            Enumeration<String> bundleKeys = bundle.getKeys();
+            
+    	    InputStream input = MongoTemplateManager.class.getClassLoader().getResourceAsStream(resource + ".properties");
+    	    dataSourceProperties.load(input);
+    	    input.close();
+            
+            Enumeration<Object> bundleKeys = dataSourceProperties.keys();
             while (bundleKeys.hasMoreElements()) {
-                String key = bundleKeys.nextElement();
-                String[] datasourceInfo = bundle.getString(key).split(",");
+                String key = (String) bundleKeys.nextElement();
+                String[] datasourceInfo = dataSourceProperties.getProperty(key).split(",");
 
                 if (datasourceInfo.length < 2) {
                     LOG.error("Unable to deal with datasource info for key " + key + ". Datasource definition requires at least 2 comma-separated strings: mongo host bean name (defined in Spring application context) and database name");
                     continue;
                 }
 
-                boolean fHidden = key.endsWith("*");
-                boolean fPublic = key.startsWith("*");
+                boolean fHidden = key.endsWith("*"), fPublic = key.startsWith("*");
                 String cleanKey = key.replaceAll("\\*", "");
+                if (cleanKey.length() == 0) {
+                	LOG.warn("Skipping unnamed datasource");
+                	continue;
+                }
 
                 if (templateMap.containsKey(cleanKey)) {
                     LOG.error("Datasource " + cleanKey + " already exists!");
@@ -219,35 +252,28 @@ public class MongoTemplateManager implements ApplicationContextAware {
                 }
 
                 try {
-                	MongoTemplate mongoTemplate = createMongoTemplate(datasourceInfo[0], datasourceInfo[1]);
+                    MongoTemplate mongoTemplate = createMongoTemplate(datasourceInfo[0], datasourceInfo[1]);
 	                if ("metaxplor_commons".equals(cleanKey))
 	                	commonsTemplate = mongoTemplate;
 	                else
 	                {
 	                    templateMap.put(cleanKey, mongoTemplate);
-	                    if (fPublic) {
+	                    if (fPublic)
 	                        publicDatabases.add(cleanKey);
-	                    }
-	                    if (fHidden) {
+	                    if (fHidden)
 	                        hiddenDatabases.add(cleanKey);
-	                    }
 	                    LOG.info("Datasource " + cleanKey + " loaded as " + (fPublic ? "public" : "private") + " and " + (fHidden ? "hidden" : "exposed"));
-	
-	                    if (datasourceInfo[1].contains(EXPIRY_PREFIX)) {
-	                        long expiryDate = Long.valueOf((datasourceInfo[1].substring(datasourceInfo[1].lastIndexOf(EXPIRY_PREFIX) + EXPIRY_PREFIX.length())));
-	                        if (System.currentTimeMillis() > expiryDate) {
-	                            if (removeDataSource(key, true)) {
-	                                LOG.info("Removed expired datasource entry: " + key + " and temporary database: " + datasourceInfo[1]);
-	                            }
-	                        }
-	                    }
 	                }
-	            } catch (Exception e) {
+                }
+                catch (UnknownHostException e) {
+                    LOG.warn("Unable to create MongoTemplate for module " + cleanKey + " (no such host)");
+                }
+                catch (Exception e) {
                     LOG.warn("Unable to create MongoTemplate for module " + cleanKey, e);
                 }
             }
-        } catch (MissingResourceException mre) {
-            LOG.error("Unable to find file " + RESOURCE + ".properties, you may need to adjust your classpath", mre);
+        } catch (IOException ioe) {
+            LOG.error("Unable to load " + resource + ".properties, you may need to adjust your classpath", ioe);
         }
     }
 
@@ -289,101 +315,108 @@ public class MongoTemplateManager implements ApplicationContextAware {
      * @throws Exception the exception
      */
     synchronized static public boolean saveOrUpdateDataSource(ModuleAction action, String sModule, boolean fPublic, boolean fHidden, String sHost, String sSpeciesName, Long expiryDate) throws Exception {	// as long as we keep all write operations in a single synchronized method, we should be safe
-    	if (sModule == null || sModule.isEmpty())
-    		throw new Exception("You must provide a database name!");
     	if (get(sModule) == null) {
-            if (!action.equals(ModuleAction.CREATE)) {
-                throw new Exception("Database " + sModule + " does not exist!");
-            }
-        } else if (action.equals(ModuleAction.CREATE)) {
-            throw new Exception("Database " + sModule + " already exists!");
+    		if (!action.equals(ModuleAction.CREATE))
+    			throw new Exception("Module " + sModule + " does not exist!");
+    	}
+    	else if (action.equals(ModuleAction.CREATE))
+    		throw new Exception("Module " + sModule + " already exists!");
+    	
+    	FileOutputStream fos = null;
+        File f = new ClassPathResource("/" + resource + ".properties").getFile();
+    	FileReader fileReader = new FileReader(f);
+
+        dataSourceProperties.load(fileReader);
+        
+    	try
+    	{
+    		if (action.equals(ModuleAction.DELETE))
+    		{
+    	        String sModuleKey = (isModulePublic(sModule) ? "*" : "") + sModule + (isModuleHidden(sModule) ? "*" : "");
+                if (!dataSourceProperties.containsKey(sModuleKey))
+                {
+                	LOG.warn("Module could not be found in datasource.properties: " + sModule);
+                	return false;
+                }
+                dataSourceProperties.remove(sModuleKey);
+                fos = new FileOutputStream(f);
+                dataSourceProperties.store(fos, null);
+                return true;
+    		}
+	        else if (action.equals(ModuleAction.CREATE))
+	        {
+	            int nRetries = 0;
+		        while (nRetries < 100)
+		        {
+		            String sIndexForModule = nRetries == 0 ? "" : ("_" + nRetries);
+		            String sDbName = "mgdb2_" + sModule + sIndexForModule + (expiryDate == null ? "" : (EXPIRY_PREFIX + expiryDate));
+		            MongoTemplate mongoTemplate = createMongoTemplate(sHost, sDbName);
+		            if (mongoTemplate.getCollectionNames().size() > 0)
+		                nRetries++;	// DB already exists, let's try with a different DB name
+		            else
+		            {
+		                if (dataSourceProperties.containsKey(sModule) || dataSourceProperties.containsKey("*" + sModule) || dataSourceProperties.containsKey(sModule + "*") || dataSourceProperties.containsKey("*" + sModule + "*"))
+		                {
+		                	LOG.warn("Tried to create a module that already exists in datasource.properties: " + sModule);
+		                	return false;
+		                }
+		                String sModuleKey = (fPublic ? "*" : "") + sModule + (fHidden ? "*" : "");
+		                dataSourceProperties.put(sModuleKey, sHost + "," + sDbName + (sSpeciesName == null ? "" : ("," + sSpeciesName)));		                fos = new FileOutputStream(f);
+		                dataSourceProperties.store(fos, null);
+
+		                templateMap.put(sModule, mongoTemplate);
+		                if (fPublic)
+		                    publicDatabases.add(sModule);
+		                if (fHidden)
+		                    hiddenDatabases.add(sModule);
+		                updateDatabaseLastModification(sModule);
+		                return true;
+		            }
+		        }
+		        throw new Exception("Unable to create a unique name for datasource " + sModule + " after " + nRetries + " retries");
+	        }
+	        else if (action.equals(ModuleAction.UPDATE_STATUS))
+	        {
+	        	String sModuleKey = (isModulePublic(sModule) ? "*" : "") + sModule + (isModuleHidden(sModule) ? "*" : "");
+                if (!dataSourceProperties.containsKey(sModuleKey))
+                {
+                	LOG.warn("Tried to update a module that could not be found in datasource.properties: " + sModule);
+                	return false;
+                }
+                String[] propValues = ((String) dataSourceProperties.get(sModuleKey)).split(",");
+                dataSourceProperties.remove(sModuleKey);
+                dataSourceProperties.put((fPublic ? "*" : "") + sModule + (fHidden ? "*" : ""), propValues[0] + "," + propValues[1] + (sSpeciesName == null ? "" : ("," + sSpeciesName)));
+                fos = new FileOutputStream(f);
+                dataSourceProperties.store(fos, null);
+                
+                if (fPublic)
+                    publicDatabases.add(sModule);
+                else
+                	publicDatabases.remove(sModule);
+                if (fHidden)
+                    hiddenDatabases.add(sModule);
+                else
+                	hiddenDatabases.remove(sModule);
+	        	return true;
+	        }
+	        else
+	        	throw new Exception("Unknown ModuleAction: " + action);
         }
-
-        FileOutputStream fos = null;
-        File f = new ClassPathResource("/" + RESOURCE + ".properties").getFile();
-        FileReader fileReader = new FileReader(f);
-        Properties properties = new Properties();
-        properties.load(fileReader);
-
-        try {
-            switch (action) {
-                case DELETE: {
-                    String sModuleKey = (isModulePublic(sModule) ? "*" : "") + sModule + (isModuleHidden(sModule) ? "*" : "");
-                    if (!properties.containsKey(sModuleKey)) {
-                        LOG.warn("Module could not be found in datasource.properties: " + sModule);
-                        return false;
-                    }
-                    properties.remove(sModuleKey);
-                    fos = new FileOutputStream(f);
-                    properties.store(fos, null);
-                    return true;
-                }
-                case CREATE:
-                    int nRetries = 0;
-                    while (nRetries < 100) {
-                        String sIndexForModule = nRetries == 0 ? "" : ("_" + nRetries);
-                        String sDbName = "mtx_" + sModule + sIndexForModule + (expiryDate == null ? "" : (EXPIRY_PREFIX + expiryDate));
-                        MongoTemplate mongoTemplate = createMongoTemplate(sHost, sDbName);
-                        if (mongoTemplate.getCollectionNames().size() > 0) {
-                            nRetries++;	// DB already exists, let's try with a different DB name
-                        } else {
-                            if (properties.containsKey(sModule) || properties.containsKey("*" + sModule) || properties.containsKey(sModule + "*") || properties.containsKey("*" + sModule + "*")) {
-                                LOG.warn("Tried to create a module that already exists in datasource.properties: " + sModule);
-                                return false;
-                            }
-                            String sModuleKey = (fPublic ? "*" : "") + sModule + (fHidden ? "*" : "");
-                            properties.put(sModuleKey, sHost + "," + sDbName + (sSpeciesName == null ? "" : ("," + sSpeciesName)));
-                            fos = new FileOutputStream(f);
-                            properties.store(fos, null);
-
-                            templateMap.put(sModule, mongoTemplate);
-                            if (fPublic) {
-                                publicDatabases.add(sModule);
-                            }
-                            if (fHidden) {
-                                hiddenDatabases.add(sModule);
-                            }
-                            return true;
-                        }
-                    }
-                    throw new Exception("Unable to create a unique name for datasource " + sModule + " after " + nRetries + " retries");
-                case UPDATE_STATUS: {
-                    String sModuleKey = (isModulePublic(sModule) ? "*" : "") + sModule + (isModuleHidden(sModule) ? "*" : "");
-                    if (!properties.containsKey(sModuleKey)) {
-                        LOG.warn("Tried to update a module that could not be found in datasource.properties: " + sModule);
-                        return false;
-                    }
-                    String[] propValues = ((String) properties.get(sModuleKey)).split(",");
-                    properties.remove(sModuleKey);
-                    properties.put((fPublic ? "*" : "") + sModule + (fHidden ? "*" : ""), propValues[0] + "," + propValues[1] + (sSpeciesName == null ? "" : ("," + sSpeciesName)));
-                    fos = new FileOutputStream(f);
-                    properties.store(fos, null);
-
-                    if (fPublic) {
-                        publicDatabases.add(sModule);
-                    } else {
-                        publicDatabases.remove(sModule);
-                    }
-                    if (fHidden) {
-                        hiddenDatabases.add(sModule);
-                    } else {
-                        hiddenDatabases.remove(sModule);
-                    }
-                    return true;
-                }
-                default:
-                    throw new Exception("Unknown ModuleAction: " + action);
-            }
-        } catch (IOException ex) {
+    	catch (IOException ex)
+    	{
             LOG.warn("Failed to update datasource.properties for action " + action + " on " + sModule, ex);
             return false;
-        } finally {
-            try {
-                fileReader.close();
-                if (fos != null) {
-                    fos.close();
-                }
-            } catch (IOException ex) {
+        }
+    	finally
+    	{
+            try 
+            {
+           		fileReader.close();
+            	if (fos != null)
+            		fos.close();
+            } 
+            catch (IOException ex)
+            {
                 LOG.debug("Failed to close FileReader", ex);
             }
         }
@@ -411,19 +444,6 @@ public class MongoTemplateManager implements ApplicationContextAware {
             LOG.warn("Failed to remove " + sModule + " datasource.properties", ex);
             return false;
         }
-    }
-
-    public static boolean doesModuleContainProject(String module, int projId) {
-        MongoTemplate mongoTemplate = MongoTemplateManager.get(module);
-        List<Integer> listId = new ArrayList<>();
-        MongoCursor<org.bson.Document> cursor = mongoTemplate.getCollection(mongoTemplate.getCollectionName(MetagenomicsProject.class)).find(null, new BasicDBObject("_id", 1)).iterator();
-        if (cursor != null && cursor.hasNext()) {
-            while (cursor.hasNext()) {
-                org.bson.Document object = cursor.next();
-                listId.add((int) object.get("_id"));
-            }
-        }
-        return listId.contains(projId);
     }
 
     public static boolean updateVisibility(String module, int projId, boolean visibility) {
@@ -481,19 +501,98 @@ public class MongoTemplateManager implements ApplicationContextAware {
     public static MongoTemplate getCommonsTemplate() {
 		return commonsTemplate;
 	}
-    
+
     public static String getModuleHost(String sModule) {
-        ResourceBundle bundle = ResourceBundle.getBundle(RESOURCE, RESOURCE_CONTROL);
-        mongoClients = applicationContext.getBeansOfType(MongoClient.class);
-        Enumeration<String> bundleKeys = bundle.getKeys();
+        Enumeration<Object> bundleKeys = dataSourceProperties.keys();
         while (bundleKeys.hasMoreElements()) {
-            String key = bundleKeys.nextElement();
+            String key = (String) bundleKeys.nextElement();
             
             if (sModule.equals(key.replaceAll("\\*", ""))) {
-            	String[] datasourceInfo = bundle.getString(key).split(",");
+            	String[] datasourceInfo = dataSourceProperties.getProperty(key).split(",");
             	return datasourceInfo[0];
             }
         }
         return null;
+    }
+    
+	public static boolean isModuleAvailableForWriting(String sModule) {
+		Set<String> projects = currentlyImportedProjects.get(sModule);
+		if (projects != null) {
+			return projects.size() == 0;
+		} else {
+			return true;
+		}
+	}
+
+	public static void lockProjectForWriting(String sModule, String sProject) {
+		Set<String> projects = currentlyImportedProjects.get(sModule);
+		if (projects != null) {
+			projects.add(sProject);
+		} else {
+			projects = new HashSet<String>();
+			projects.add(sProject);
+			currentlyImportedProjects.put(sModule, projects);
+		}
+	}
+
+	public static void unlockProjectForWriting(String sModule, String sProject) {
+		Set<String> moduleLockedProjects = currentlyImportedProjects.get(sModule);
+		if (moduleLockedProjects == null)
+			throw new NoSuchElementException("There are currently no locked projects in database " + sModule);
+		moduleLockedProjects.remove(sProject);
+	}
+
+	public static void lockModuleForWriting(String sModule) {
+		Set<String> projects = currentlyImportedProjects.get(sModule);
+		if (projects != null) {
+			projects.add(null);
+		} else {
+			projects = new HashSet<String>();
+			projects.add(null);
+			currentlyImportedProjects.put(sModule, projects);
+		}
+	}
+
+	public static void unlockModuleForWriting(String sModule) {
+		Set<String> projects = currentlyImportedProjects.get(sModule);
+		if (projects != null) {
+			projects.clear();
+		}
+	}
+	
+    public static void updateDatabaseLastModification(String sModule) {
+    	MongoTemplateManager.updateDatabaseLastModification(sModule, new Date(), false);
+    }
+    
+    public static void updateDatabaseLastModification(String sModule, Date lastModification, boolean restored) {
+    	MongoTemplate template = MongoTemplateManager.get(sModule);
+    	
+    	Update update = new Update();
+    	update.set(DatabaseInformation.FIELDNAME_LAST_MODIFICATION, lastModification);
+    	update.set(DatabaseInformation.FIELDNAME_RESTORE_DATE, restored ? new Date() : null);
+    	template.upsert(new Query(), update, "dbInfo");
+    }
+    
+    public static DatabaseInformation getDatabaseInformation(String sModule) {
+    	MongoTemplate template = MongoTemplateManager.get(sModule);
+    	return template.findOne(new Query(), DatabaseInformation.class, "dbInfo");
+    }
+    
+    public static String getDatabaseName(String sModule) {
+    	String sModuleKey = (isModulePublic(sModule) ? "*" : "") + sModule + (isModuleHidden(sModule) ? "*" : "");
+    	String dataSource = dataSourceProperties.getProperty(sModuleKey);
+    	return dataSource.split(",")[1];
+    }
+    
+    public static List<String> getServerHosts(String sHost) {
+    	MongoClient client = mongoClients.get(sHost);
+    	ClusterDescription cluster = client.getClusterDescription();
+    	List<ServerDescription> servers = cluster.getServerDescriptions();
+    	List<String> hosts = new ArrayList<String>();
+    	for (ServerDescription desc : servers) {
+    		ServerAddress address = desc.getAddress();
+    		hosts.add(address.getHost() + ":" + address.getPort());
+    	}
+    	return hosts;
     }
 }
