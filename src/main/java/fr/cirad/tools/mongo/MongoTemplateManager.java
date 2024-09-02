@@ -115,18 +115,6 @@ public class MongoTemplateManager implements ApplicationContextAware {
 
     private static final String DOT_REPLACEMENT_STRING = "\\[dot\\]";
 
-    private static final Control RESOURCE_CONTROL = new ResourceBundle.Control() {
-        @Override
-        public boolean needsReload(String baseName, java.util.Locale locale, String format, ClassLoader loader, ResourceBundle bundle, long loadTime) {
-            return true;
-        }
-
-        @Override
-        public long getTimeToLive(String baseName, java.util.Locale locale) {
-            return 0;
-        }
-    };
-
     public enum ModuleAction {
         CREATE, UPDATE_STATUS, DELETE;
     }

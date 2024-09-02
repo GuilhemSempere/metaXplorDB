@@ -5,7 +5,7 @@
     <name>MetaXplor DataBase</name>
     <groupId>fr.cirad</groupId>
     <artifactId>metaXplorDB</artifactId>
-    <version>1.1-RELEASE</version>
+    <version>1.1.1-RELEASE</version>
 
     <developers>
         <developer>
@@ -15,11 +15,11 @@
 
     <dependencies>
 		
-		<dependency>
-			<groupId>javax.activation</groupId>
-			<artifactId>activation</artifactId>
-			<version>1.1</version>
-		</dependency>
+<!--		<dependency>-->
+<!--			<groupId>javax.activation</groupId>-->
+<!--			<artifactId>activation</artifactId>-->
+<!--			<version>1.1</version>-->
+<!--		</dependency>-->
 
 		<dependency>
 		    <groupId>commons-collections</groupId>
