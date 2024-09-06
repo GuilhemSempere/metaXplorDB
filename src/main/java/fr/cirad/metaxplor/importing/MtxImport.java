@@ -45,8 +45,6 @@ import java.util.stream.Collectors;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
-import javax.activation.UnsupportedDataTypeException;
-
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.lang.StringUtils;
 import org.apache.log4j.Logger;
@@ -301,9 +299,9 @@ public class MtxImport {
      * @param projectId
      * @param progress 
      * @throws ClassNotFoundException 
-     * @throws UnsupportedDataTypeException 
+     * @throws UnsupportedOperationException 
      */
-    private synchronized static void updateDBFieldsAndComputeCache(String module, Collection<DBField> fields, int projectId, ProgressIndicator progress) throws ClassNotFoundException, UnsupportedDataTypeException {        
+    private synchronized static void updateDBFieldsAndComputeCache(String module, Collection<DBField> fields, int projectId, ProgressIndicator progress) throws ClassNotFoundException, UnsupportedOperationException {        
     	if (fields.isEmpty())
     		return;
     	
@@ -374,7 +372,7 @@ public class MtxImport {
         		assignmentFieldsToPersistForModule.remove(key);
     }
     
-    public static void computeFieldCache(MongoTemplate mongoTemplate, int projectId, DBField dbField) throws UnsupportedDataTypeException, ClassNotFoundException {
+    public static void computeFieldCache(MongoTemplate mongoTemplate, int projectId, DBField dbField) throws UnsupportedOperationException, ClassNotFoundException {
         boolean fIsAssignmentField = AssignedSequence.FIELDNAME_ASSIGNMENT.equals(dbField.getEntityTypeAlias());
     	Class type = dbField.getTypeClass();
     	String pathPrefix = fIsAssignmentField ? AssignedSequence.FIELDNAME_ASSIGNMENT + "." : ""; 
@@ -424,7 +422,7 @@ public class MtxImport {
             mongoTemplate.save(new HashMap() {{ put("_id", projectId); put(DBConstant.FIELDNAME_MIN, min); put(DBConstant.FIELDNAME_MAX, max); }}, cacheCollectionName);
     }
     else if (!Double[].class.equals(type))
-    	throw new UnsupportedDataTypeException("Unsupported field type: " + type);
+    	throw new UnsupportedOperationException("Unsupported field type: " + type);
     }
 
     /**

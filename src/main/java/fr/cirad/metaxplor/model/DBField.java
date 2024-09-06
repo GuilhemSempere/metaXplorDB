@@ -23,8 +23,6 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.stream.Collectors;
 
-import javax.activation.UnsupportedDataTypeException;
-
 import org.apache.commons.collections.bidimap.DualHashBidiMap;
 import org.apache.log4j.Logger;
 import org.springframework.data.annotation.Id;
@@ -85,7 +83,7 @@ public class DBField {
 			requiredFields.put(Sample.TYPE_ALIAS, Arrays.asList(Sample.FIELDNAME_SAMPLE_CODE /*linked to sample type because expected to be found in sample file*/, Sample.FIELDNAME_COLLECT_GPS, Sample.FIELDNAME_COLLECT_DATE));
 			requiredFields.put(AssignedSequence.FIELDNAME_ASSIGNMENT, Arrays.asList(Sequence.FIELDNAME_QSEQID, Assignment.FIELDNAME_ASSIGN_METHOD));
 		}
-		catch (UnsupportedDataTypeException e)
+		catch (UnsupportedOperationException e)
 		{
 			LOG.error(e);
 		}
@@ -118,9 +116,9 @@ public class DBField {
 		return fieldName;
 	}
     
-	public DBField(int id, String entityTypeAlias, String fieldName, String type) throws UnsupportedDataTypeException {
+	public DBField(int id, String entityTypeAlias, String fieldName, String type) throws UnsupportedOperationException {
 		if (!supportedTypes.containsValue(type))
-    		throw new UnsupportedDataTypeException("supported types are: " + DBConstant.STRING_TYPE + ", " + DBConstant.STRING_ARRAY_TYPE + ", " + DBConstant.DOUBLE_TYPE + ", " + DBConstant.DATE_TYPE + ", " + DBConstant.GPS_TYPE);
+    		throw new UnsupportedOperationException("supported types are: " + DBConstant.STRING_TYPE + ", " + DBConstant.STRING_ARRAY_TYPE + ", " + DBConstant.DOUBLE_TYPE + ", " + DBConstant.DATE_TYPE + ", " + DBConstant.GPS_TYPE);
     
     	this.id = id;
 		this.entityTypeAlias = entityTypeAlias;

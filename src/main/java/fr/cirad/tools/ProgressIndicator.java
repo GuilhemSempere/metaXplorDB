@@ -1,5 +1,5 @@
 /*******************************************************************************
- * metaXplorDB - Copyright (C) 2020 <CIRAD>
+ * metaXplorDB - Copyright (C) 2020 - 2024 <CIRAD>
  * This program is free software: you can redistribute it and/or modify it under
  * the terms of the GNU Affero General Public License, version 3 as published by
  * the Free Software Foundation.
@@ -19,146 +19,200 @@ import java.text.NumberFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Timer;
 import java.util.TimerTask;
 
 import org.apache.log4j.Logger;
+
 /**
- * class to handle the progress of a query / action 
- * @author petel, sempere
+ * The Class ProgressIndicator.
  */
-public class ProgressIndicator {
+public class ProgressIndicator
+{
+	
+	private static final Logger LOG = Logger.getLogger(ProgressIndicator.class);
+	
+	static private final HashMap<String, ProgressIndicator> progressIndicators = new HashMap<String, ProgressIndicator>();
+	
+	/** The m_process id. */
+	private String m_processId;
+	
+	/** The current step progress. */
+	private long m_currentStepProgress = 0;
+	
+	/** The current step number. */
+	private short m_currentStepNumber = 0;
+	
+	/** The step labels. */
+	private List<String> m_stepLabels = new ArrayList<String>();
+	
+	/** The error message if any. */
+	private String m_error = null;
+	
+	/** The notification email. */
+	private String m_notificationEmail = null;
+	
+	/** The description. */
+	private String m_description = null;
+	
+	/** whether it was aborted. */
+	private boolean m_fAborted = false;
+	
+	/** whether it is complete. */
+	private boolean m_fComplete = false;
+	
+	/** Whether it supports percentage. */
+	private boolean m_fSupportsPercentage = true;
 
-    private static final Logger LOG = Logger.getLogger(ProgressIndicator.class);
+	/** The final message if any. */
+	private String m_finalMessage;
 
-    private static final HashMap<String, ProgressIndicator> progressIndicators = new HashMap<>();
-    
 	/** The us number format. */
 	static private NumberFormat usNumberFormat = NumberFormat.getNumberInstance(Locale.US);
 
-    private final String m_processId;
-    private int m_currentStepProgress = 0;
-    private short m_currentStepNumber = 0;
-    private final List<String> m_stepLabels = new ArrayList<>();
-    private String m_error = null;
-    private String m_notificationEmail = null;
-    private boolean m_fAborted = false;
-    private boolean m_fComplete = false;
-    private boolean m_fSupportsPercentage = true;
-	private String m_description = null;
+	static private HashSet<String> cancelledRemovals = new HashSet<>();
 
-    public ProgressIndicator(String sProcessId, String[] stepLabels) {
-        m_processId = sProcessId;
-        this.m_stepLabels.addAll(Arrays.asList(stepLabels));
-    }
-
-    public void setPercentageEnabled(boolean fEnabled) {
-        m_fSupportsPercentage = fEnabled;
-    }
-
-    public void addStep(String sStepLabel) {
-        m_stepLabels.add(sStepLabel);
-    }
-
-    public String getProcessId() {
-        return m_processId;
-    }
-
-    public int getCurrentStepProgress() {
-        return m_currentStepProgress;
-    }
-
-    public void setCurrentStepProgress(int currentStepProgress) {
-        if (m_fSupportsPercentage && (currentStepProgress < 0 || currentStepProgress > 100)) {
-            LOG.warn("Invalid value for currentStepProgress: " + currentStepProgress);
-        }
-        this.m_currentStepProgress = currentStepProgress;
-    }
-
-    public short getCurrentStepNumber() {
-        return m_currentStepNumber;
-    }
-
-    public void moveToNextStep() {
-        m_currentStepNumber++;
-        if (m_currentStepNumber > m_stepLabels.size()) {
-            LOG.warn("Moving to unexisting step: " + m_currentStepNumber);
-        }
-        m_currentStepProgress = 0;
-    }
-
-    public short getStepCount() {
-        return (short) m_stepLabels.size();
-    }
-
-    public String getError() {
-        return m_error;
-    }
-
-    public void setError(String error) {
-        this.m_error = error;
-        remove();
-    }
-
-    public String getNotificationEmail() {
-        return m_notificationEmail;
-    }
-
-    public void setNotificationEmail(String notificationEmail) {
-        this.m_notificationEmail = notificationEmail;
-    }
-
-//    public String getProgressDescription() {
-//        if (stepLabels.size() <= currentStepNumber) {
-//            return "Please wait...";
-//        }
-//
-//        return stepLabels.get(currentStepNumber) + "... " + (currentStepProgress == 0 ? "" : (currentStepProgress + (fSupportsPercentage ? "%" : "")));
-//    }
-
-    public void abort() {
-        m_fAborted = true;
-        remove();
-    }
-    
-	private void remove()
+	/**
+	 * Instantiates a new progress indicator.
+	 *
+	 * @param sProcessId the process id
+	 * @param stepLabels the step labels
+	 */
+	public ProgressIndicator(String sProcessId, String[] stepLabels)
 	{
-		new Timer().schedule(new TimerTask() {
-		    @Override
-		    public void run() {
-		    	progressIndicators.remove(m_processId);
-		    	LOG.debug("removed " + (hashCode()  + ": " + getProgressDescription()) + " for process " + m_processId);
-		    }
-		}, 1500);
+		m_processId = sProcessId;
+		m_stepLabels.addAll(Arrays.asList(stepLabels));
+//		LOG.debug("ProgressIndicator " + hashCode() + " created for process " + sProcessId);
+	}
+	
+	/**
+	 * Sets the percentage enabled.
+	 *
+	 * @param fEnabled the new percentage enabled
+	 */
+	public void setPercentageEnabled(boolean fEnabled)
+	{
+		m_fSupportsPercentage = fEnabled;
+	}
+	
+	/**
+	 * Adds the step.
+	 *
+	 * @param sStepLabel the step label
+	 */
+	public void addStep(String sStepLabel)
+	{
+		m_stepLabels.add(sStepLabel);
+	}
+		
+	/**
+	 * Gets the step label.
+	 *
+	 * @param nStepNumber the n step number
+	 * @return the step label
+	 */
+	public String getStepLabel(short nStepNumber)
+	{
+		return m_stepLabels.get(nStepNumber);
 	}
 
-    public boolean hasAborted() {
-        return m_fAborted;
-    }
+	/**
+	 * Gets the process id.
+	 *
+	 * @return the process id
+	 */
+	public String getProcessId() {
+		return m_processId;
+	}
 
-    public void markAsComplete() {
-        m_fComplete = true;
-    }
+	/**
+	 * Gets the current step progress.
+	 *
+	 * @return the current step progress
+	 */
+	public long getCurrentStepProgress() {
+		return m_currentStepProgress;
+	}
 
-    public boolean isComplete() {
-        return m_fComplete;
-    }
+	/**
+	 * Sets the current step progress.
+	 *
+	 * @param currentStepProgress the new current step progress
+	 */
+	public void setCurrentStepProgress(long currentStepProgress) {
+		if (m_fSupportsPercentage && (currentStepProgress < 0 || currentStepProgress > 100))
+			LOG.warn("Invalid value for currentStepProgress: " + currentStepProgress);
+		m_currentStepProgress = currentStepProgress;
+	}
 
-    public static ProgressIndicator get(String sProcessID) {
-        ProgressIndicator progress = progressIndicators.get(sProcessID);
-        if (progress != null && progress.isComplete()) {
-            LOG.debug("removing ProgressIndicator for process " + sProcessID);
-            progress.remove();	// we don't want to keep them forever
-        }
-        return progress;
-    }
+	/**
+	 * Gets the current step number.
+	 *
+	 * @return the current step number
+	 */
+	public short getCurrentStepNumber() {
+		return m_currentStepNumber;
+	}
 
-    public static void registerProgressIndicator(ProgressIndicator progress) {
-        progressIndicators.put(progress.getProcessId(), progress);
-    }
-    
+	/**
+	 * Move to next step.
+	 */
+	public void moveToNextStep() {
+		m_currentStepNumber++;
+		if (m_currentStepNumber > m_stepLabels.size())
+			LOG.warn("Moving to unexisting step: " + m_currentStepNumber);
+		m_currentStepProgress = 0;
+	}
+
+	/**
+	 * Gets the step count.
+	 *
+	 * @return the step count
+	 */
+	public short getStepCount() {
+		return (short) m_stepLabels.size();
+	}
+	
+	/**
+	 * Gets the error.
+	 *
+	 * @return the error
+	 */
+	public String getError() {
+		return m_error;
+	}
+
+	/**
+	 * Sets the error.
+	 *
+	 * @param error the new error
+	 */
+	public void setError(String error) {
+		m_error = error;
+//		remove(2500);
+	}
+	
+	/**
+	 * Gets the notification email.
+	 *
+	 * @return the notification email
+	 */
+	public String getNotificationEmail() {
+		return m_notificationEmail;
+	}
+
+	/**
+	 * Sets the notification email.
+	 *
+	 * @param notificationEmail the new notification email
+	 */
+	public void setNotificationEmail(String notificationEmail) {
+		m_notificationEmail = notificationEmail;
+	}
+	
 	/**
 	 * Sets the progress description.
 	 *
@@ -181,5 +235,112 @@ public class ProgressIndicator {
 			return m_description;
 
 		return m_stepLabels.get(m_currentStepNumber) + "... " + (m_currentStepProgress == 0 ? "" : ((m_fSupportsPercentage ? m_currentStepProgress : usNumberFormat.format(m_currentStepProgress)) + (m_fSupportsPercentage ? "%" : "")));
+	}
+	
+	/**
+	 * Abort.
+	 */
+	public void abort() {
+		setAborted(true);
+	}
+	
+	/**
+	 * Remove ProgressIndicator from static Map
+	 *
+	 * @param delay, time to wait before removing (delay needed because there may be several client pages looking at it (when importing for instance))
+	 */
+	private void remove(int delay)
+	{
+		new Timer().schedule(new TimerTask() {
+		    @Override
+		    public void run() {
+		    	if (cancelledRemovals.contains(m_processId)) {
+		    		LOG.debug("cancelled removal " + (hashCode()  + ": " + getProgressDescription()) + " for process " + m_processId);
+		    		cancelledRemovals.remove(m_processId);
+		    	}
+		    	else {
+			    	progressIndicators.remove(m_processId);
+			    	LOG.debug("removed " + (hashCode()  + ": " + getProgressDescription()) + " for process " + m_processId);
+		    	}
+		    }
+		}, delay);
+	}
+	
+	/**
+	 * Checks for aborted.
+	 *
+	 * @return true, if successful
+	 */
+	public boolean isAborted() {
+		return m_fAborted;
+	}
+	
+	/**
+	 * Mark as complete.
+	 */
+	public void markAsComplete(String sFinalMessage) {
+		this.m_finalMessage = sFinalMessage;
+		setComplete(true);
+	}
+	
+	/**
+	 * Mark as complete.
+	 */
+	public void markAsComplete() {
+		markAsComplete(null);
+	}
+	
+	/**
+	 * Checks if complete.
+	 *
+	 * @return true, if complete
+	 */
+	public boolean isComplete() {
+		return m_fComplete;
+	}
+
+	protected void setAborted(boolean fAborted) {
+		m_fAborted = fAborted;
+	}
+	
+	protected void setComplete(boolean fComplete) {
+		m_fComplete = fComplete;
+	}
+
+	protected void setFinalMessage(String finalMessage) {
+		m_finalMessage = finalMessage;
+	}
+
+	public String getFinalMessage() {
+		return m_finalMessage;
+	}
+	
+	/**
+	 * Gets by id.
+	 *
+	 * @param sProcessID the process id
+	 * @return the progress indicator
+	 */
+	public static ProgressIndicator get(final String sProcessID)
+	{
+		ProgressIndicator progress = progressIndicators.get(sProcessID);
+		if (progress != null && (progress.isComplete() || progress.isAborted() || progress.getError() != null))
+	    	progress.remove(2500);	// we don't want to keep them forever
+
+//		LOG.info("returning " + (progress == null ? progress : (progress.hashCode()  + ": " + progress.getProgressDescription())) + " for process " + sProcessID);
+		return progress;
+	}
+
+	/**
+	 * Register progress indicator.
+	 *
+	 * @param progress the progress
+	 */
+	public static void registerProgressIndicator(ProgressIndicator progress)
+	{
+//		LOG.debug("adding " + (progress.hashCode()  + ": " + progress.getProgressDescription()) + " for process " + progress.getProcessId());
+		if (progressIndicators.containsKey(progress.getProcessId()))
+			cancelledRemovals.add(progress.getProcessId());		// client is re-querying before we had the time to remove this process from our list: cancel its removal otherwise it won't be able to track it
+		progressIndicators.put(progress.getProcessId(), progress);
 	}
 }
