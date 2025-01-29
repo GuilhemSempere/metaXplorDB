@@ -337,7 +337,7 @@ public class MongoTemplateManager implements ApplicationContextAware {
 		        while (nRetries < 100)
 		        {
 		            String sIndexForModule = nRetries == 0 ? "" : ("_" + nRetries);
-		            String sDbName = "mgdb2_" + sModule + sIndexForModule + (expiryDate == null ? "" : (EXPIRY_PREFIX + expiryDate));
+		            String sDbName = "mtx_" + sModule + sIndexForModule + (expiryDate == null ? "" : (EXPIRY_PREFIX + expiryDate));
 		            MongoTemplate mongoTemplate = createMongoTemplate(sHost, sDbName);
 		            if (mongoTemplate.getCollectionNames().size() > 0)
 		                nRetries++;	// DB already exists, let's try with a different DB name
